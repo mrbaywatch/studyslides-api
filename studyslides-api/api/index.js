@@ -47,7 +47,7 @@ module.exports = async function handler(req, res) {
         inputText, 
         textMode = 'generate',
         format = 'presentation',
-        themeId = null,  // Optional - will use Gamma default if not provided
+        themeId = null,
         numCards = 8,
         additionalInstructions = '',
         exportAs = 'pptx',
@@ -62,7 +62,7 @@ module.exports = async function handler(req, res) {
 
       console.log('Generating presentation:', inputText.substring(0, 100));
 
-      // Build request body - only include themeId if provided
+      // Build request body
       const requestBody = {
         inputText,
         textMode,
@@ -70,7 +70,7 @@ module.exports = async function handler(req, res) {
         numCards: Math.min(Math.max(numCards, 1), 60),
         cardSplit: 'auto',
         additionalInstructions,
-        exportAs,
+        exportAs: 'pptx', // Always request PPTX export
         textOptions: {
           amount: textOptions.amount || 'medium',
           tone: textOptions.tone || 'professional',
@@ -86,7 +86,7 @@ module.exports = async function handler(req, res) {
         }
       };
 
-      // Only add themeId if it's provided and not empty
+      // Only add themeId if provided
       if (themeId && themeId.trim()) {
         requestBody.themeId = themeId;
       }
@@ -146,15 +146,45 @@ module.exports = async function handler(req, res) {
       }
 
       const data = await response.json();
+      console.log('Full status response:', JSON.stringify(data, null, 2));
+      
+      // Extract URLs from various possible response formats
+      const gammaUrl = data.url || data.gammaUrl || data.gamma_url;
+      
+      // Check all possible locations for download URLs
+      let pptxUrl = data.pptxUrl || data.pptx_url || data.downloadLink || data.download_link;
+      let pdfUrl = data.pdfUrl || data.pdf_url;
+      
+      // Check exports object
+      if (data.exports) {
+        pptxUrl = pptxUrl || data.exports.pptx || data.exports.pptxUrl;
+        pdfUrl = pdfUrl || data.exports.pdf || data.exports.pdfUrl;
+      }
+      
+      // Check if downloadLink contains pptx
+      if (data.downloadLink && data.downloadLink.includes('.pptx')) {
+        pptxUrl = data.downloadLink;
+      }
+      if (data.downloadLink && data.downloadLink.includes('.pdf')) {
+        pdfUrl = data.downloadLink;
+      }
+      
+      // If status is completed but no download URLs yet, mark as "processing_export"
+      let status = data.status;
+      if (data.status === 'completed' && !pptxUrl && !pdfUrl) {
+        // Keep polling - exports might still be generating
+        status = 'processing_export';
+      }
       
       return res.status(200).json({
-        status: data.status,
+        status: status,
         generationId: data.generationId,
-        url: data.url || data.gammaUrl,
-        pptxUrl: data.pptxUrl,
-        pdfUrl: data.pdfUrl,
+        url: gammaUrl,
+        pptxUrl: pptxUrl || null,
+        pdfUrl: pdfUrl || null,
         title: data.title,
-        creditsUsed: data.credits?.deducted
+        creditsUsed: data.credits?.deducted,
+        raw: data // Include raw response for debugging
       });
     }
 
@@ -179,61 +209,6 @@ module.exports = async function handler(req, res) {
       res.setHeader('Content-Type', contentType);
       res.setHeader('Content-Disposition', `attachment; filename="${filename}.${ext}"`);
       return res.send(Buffer.from(buffer));
-    }
-
-    // Import from URL
-    if (path === '/api/import-url' && req.method === 'POST') {
-      const { 
-        url, 
-        themeId = null,
-        numCards = 8,
-        additionalInstructions = '',
-        exportAs = 'pptx'
-      } = req.body;
-
-      if (!url) {
-        return res.status(400).json({ error: 'URL is required' });
-      }
-
-      const requestBody = {
-        inputText: `Create a presentation based on the content from this URL: ${url}`,
-        textMode: 'generate',
-        format: 'presentation',
-        numCards,
-        additionalInstructions: `Import and transform content from: ${url}. ${additionalInstructions}`,
-        exportAs,
-        imageOptions: {
-          source: 'aiGenerated',
-          style: 'modern, professional'
-        },
-        cardOptions: {
-          dimensions: '16x9'
-        }
-      };
-
-      if (themeId && themeId.trim()) {
-        requestBody.themeId = themeId;
-      }
-
-      const gammaResponse = await fetch(`${GAMMA_API_URL}/generations`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-KEY': GAMMA_API_KEY
-        },
-        body: JSON.stringify(requestBody)
-      });
-
-      if (!gammaResponse.ok) {
-        const errorData = await gammaResponse.json().catch(() => ({}));
-        throw new Error(errorData.message || 'Failed to import from URL');
-      }
-
-      const data = await gammaResponse.json();
-      return res.status(200).json({
-        generationId: data.generationId,
-        status: 'pending'
-      });
     }
 
     return res.status(404).json({ error: 'Not found' });
