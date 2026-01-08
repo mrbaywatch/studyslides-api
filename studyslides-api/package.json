@@ -1,0 +1,8 @@
+{
+  "name": "studyslides-api",
+  "version": "1.0.0",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.24.0",
+    "pptxgenjs": "^3.12.0"
+  }
+}
