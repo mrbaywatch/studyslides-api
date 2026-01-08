@@ -12,30 +12,23 @@ const themes = {
   dark: { name: 'Dark', background: '18181B', text: 'FAFAFA', accent: 'A855F7', secondary: '27272A' }
 };
 
-// CORS headers
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
-};
-
 module.exports = async function handler(req, res) {
+  // Set CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
-    return res.status(200).set(corsHeaders).end();
+    return res.status(200).end();
   }
-
-  // Set CORS headers
-  Object.entries(corsHeaders).forEach(([key, value]) => {
-    res.setHeader(key, value);
-  });
 
   const path = req.url.split('?')[0];
 
   try {
     // Health check
     if (path === '/api/health') {
-      return res.json({ status: 'ok', time: new Date().toISOString() });
+      return res.status(200).json({ status: 'ok', time: new Date().toISOString() });
     }
 
     // Generate outline
@@ -51,7 +44,7 @@ module.exports = async function handler(req, res) {
           role: 'user',
           content: `You are an expert presentation designer. Create a detailed, content-rich outline for a ${presentationType} presentation with exactly ${slideCount} slides about: "${content}"
 
-CRITICAL: Generate REAL, SPECIFIC content about the topic. Research and include actual facts, statistics, and insights.
+CRITICAL: Generate REAL, SPECIFIC content about the topic. Include actual facts, statistics, and insights.
 
 Return ONLY valid JSON (no markdown, no backticks, no explanation):
 {
@@ -93,7 +86,6 @@ IMPORTANT:
       const text = response.content[0].text;
       console.log('API Response:', text.substring(0, 500));
       
-      // Extract JSON
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
         throw new Error('No JSON found in response');
@@ -102,7 +94,7 @@ IMPORTANT:
       const json = JSON.parse(jsonMatch[0]);
       console.log('Parsed outline:', json.title, 'with', json.outline?.length, 'slides');
       
-      return res.json(json);
+      return res.status(200).json(json);
     }
 
     // Generate slide content
@@ -156,7 +148,7 @@ IMPORTANT:
       const json = JSON.parse(jsonMatch[0]);
       console.log('Generated slide content:', json.title);
       
-      return res.json(json);
+      return res.status(200).json(json);
     }
 
     // Generate PowerPoint
@@ -198,7 +190,6 @@ IMPORTANT:
                 fontSize: 20, fontFace: 'Arial', color: theme.text, transparency: 40
               });
             }
-            // Accent line
             slide.addShape(pptx.shapes.RECTANGLE, { 
               x: 0.8, y: 3.8, w: 2, h: 0.08, 
               fill: { color: theme.accent } 
@@ -274,20 +265,17 @@ IMPORTANT:
             const content = slideData.content || [];
             const mid = Math.ceil(content.length / 2);
             
-            // Left column
             const leftItems = content.slice(0, mid).map(c => ({
               text: c,
               options: { bullet: { color: theme.accent }, fontSize: 16, color: theme.text, paraSpaceAfter: 12 }
             }));
             slide.addText(leftItems, { x: 0.8, y: 1.4, w: 4, h: 3.5 });
             
-            // Divider
             slide.addShape(pptx.shapes.RECTANGLE, { 
               x: 4.9, y: 1.4, w: 0.02, h: 3, 
               fill: { color: theme.accent }, transparency: 50
             });
             
-            // Right column
             const rightItems = content.slice(mid).map(c => ({
               text: c,
               options: { bullet: { color: theme.accent }, fontSize: 16, color: theme.text, paraSpaceAfter: 12 }
@@ -295,7 +283,7 @@ IMPORTANT:
             slide.addText(rightItems, { x: 5.2, y: 1.4, w: 4, h: 3.5 });
             break;
 
-          default: // content
+          default:
             slide.addText(slideData.title || '', { 
               x: 0.8, y: 0.5, w: 8, h: 0.7, 
               fontSize: 28, fontFace: 'Arial', color: theme.text, bold: true 
@@ -315,7 +303,6 @@ IMPORTANT:
             }
         }
 
-        // Slide number
         slide.addText(String(slideData.id), { 
           x: 9.2, y: 5.1, w: 0.4, h: 0.3, 
           fontSize: 10, color: theme.text, transparency: 50 
@@ -328,10 +315,10 @@ IMPORTANT:
       return res.send(buffer);
     }
 
-    res.status(404).json({ error: 'Not found' });
+    return res.status(404).json({ error: 'Not found' });
 
   } catch (error) {
     console.error('API Error:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    return res.status(500).json({ error: error.message || 'Internal server error' });
   }
 };
