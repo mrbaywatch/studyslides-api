@@ -27,11 +27,13 @@ module.exports = async function handler(req, res) {
 
     // Get available themes from Gamma
     if (path === '/api/themes' && req.method === 'GET') {
-      const response = await fetch(`${GAMMA_API_URL}/themes`, {
+      const response = await fetch(`${GAMMA_API_URL}/themes?limit=50`, {
         headers: { 'X-API-KEY': GAMMA_API_KEY }
       });
       
       if (!response.ok) {
+        const err = await response.text();
+        console.error('Themes error:', err);
         throw new Error('Failed to fetch themes');
       }
       
@@ -45,7 +47,7 @@ module.exports = async function handler(req, res) {
         inputText, 
         textMode = 'generate',
         format = 'presentation',
-        themeId = 'Starter',
+        themeId = null,  // Optional - will use Gamma default if not provided
         numCards = 8,
         additionalInstructions = '',
         exportAs = 'pptx',
@@ -60,6 +62,37 @@ module.exports = async function handler(req, res) {
 
       console.log('Generating presentation:', inputText.substring(0, 100));
 
+      // Build request body - only include themeId if provided
+      const requestBody = {
+        inputText,
+        textMode,
+        format,
+        numCards: Math.min(Math.max(numCards, 1), 60),
+        cardSplit: 'auto',
+        additionalInstructions,
+        exportAs,
+        textOptions: {
+          amount: textOptions.amount || 'medium',
+          tone: textOptions.tone || 'professional',
+          audience: textOptions.audience || 'general',
+          language: textOptions.language || 'en'
+        },
+        imageOptions: {
+          source: imageOptions.source || 'aiGenerated',
+          style: imageOptions.style || 'modern, professional'
+        },
+        cardOptions: {
+          dimensions: cardOptions.dimensions || '16x9'
+        }
+      };
+
+      // Only add themeId if it's provided and not empty
+      if (themeId && themeId.trim()) {
+        requestBody.themeId = themeId;
+      }
+
+      console.log('Request body:', JSON.stringify(requestBody, null, 2));
+
       // Call Gamma API
       const gammaResponse = await fetch(`${GAMMA_API_URL}/generations`, {
         method: 'POST',
@@ -67,42 +100,24 @@ module.exports = async function handler(req, res) {
           'Content-Type': 'application/json',
           'X-API-KEY': GAMMA_API_KEY
         },
-        body: JSON.stringify({
-          inputText,
-          textMode,
-          format,
-          themeId,
-          numCards: Math.min(Math.max(numCards, 1), 60),
-          cardSplit: 'auto',
-          additionalInstructions,
-          exportAs,
-          textOptions: {
-            amount: textOptions.amount || 'medium',
-            tone: textOptions.tone || 'professional',
-            audience: textOptions.audience || 'general',
-            language: textOptions.language || 'en',
-            ...textOptions
-          },
-          imageOptions: {
-            source: imageOptions.source || 'aiGenerated',
-            model: imageOptions.model || 'flux-1-pro',
-            style: imageOptions.style || 'modern, professional',
-            ...imageOptions
-          },
-          cardOptions: {
-            dimensions: cardOptions.dimensions || '16x9',
-            ...cardOptions
-          }
-        })
+        body: JSON.stringify(requestBody)
       });
 
+      const responseText = await gammaResponse.text();
+      console.log('Gamma response:', responseText);
+
       if (!gammaResponse.ok) {
-        const errorData = await gammaResponse.json().catch(() => ({}));
+        let errorData;
+        try {
+          errorData = JSON.parse(responseText);
+        } catch {
+          errorData = { message: responseText };
+        }
         console.error('Gamma API error:', errorData);
-        throw new Error(errorData.message || 'Failed to start generation');
+        throw new Error(errorData.message || errorData.error || 'Failed to start generation');
       }
 
-      const generationData = await gammaResponse.json();
+      const generationData = JSON.parse(responseText);
       console.log('Generation started:', generationData.generationId);
 
       return res.status(200).json({
@@ -125,6 +140,8 @@ module.exports = async function handler(req, res) {
       });
 
       if (!response.ok) {
+        const err = await response.text();
+        console.error('Status check error:', err);
         throw new Error('Failed to check status');
       }
 
@@ -133,11 +150,11 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({
         status: data.status,
         generationId: data.generationId,
-        url: data.url,
+        url: data.url || data.gammaUrl,
         pptxUrl: data.pptxUrl,
         pdfUrl: data.pdfUrl,
         title: data.title,
-        creditsUsed: data.creditsUsed
+        creditsUsed: data.credits?.deducted
       });
     }
 
@@ -168,7 +185,7 @@ module.exports = async function handler(req, res) {
     if (path === '/api/import-url' && req.method === 'POST') {
       const { 
         url, 
-        themeId = 'Starter',
+        themeId = null,
         numCards = 8,
         additionalInstructions = '',
         exportAs = 'pptx'
@@ -178,29 +195,33 @@ module.exports = async function handler(req, res) {
         return res.status(400).json({ error: 'URL is required' });
       }
 
-      // Fetch content from URL and use as input
+      const requestBody = {
+        inputText: `Create a presentation based on the content from this URL: ${url}`,
+        textMode: 'generate',
+        format: 'presentation',
+        numCards,
+        additionalInstructions: `Import and transform content from: ${url}. ${additionalInstructions}`,
+        exportAs,
+        imageOptions: {
+          source: 'aiGenerated',
+          style: 'modern, professional'
+        },
+        cardOptions: {
+          dimensions: '16x9'
+        }
+      };
+
+      if (themeId && themeId.trim()) {
+        requestBody.themeId = themeId;
+      }
+
       const gammaResponse = await fetch(`${GAMMA_API_URL}/generations`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-API-KEY': GAMMA_API_KEY
         },
-        body: JSON.stringify({
-          inputText: `Create a presentation based on this URL: ${url}`,
-          textMode: 'generate',
-          format: 'presentation',
-          themeId,
-          numCards,
-          additionalInstructions: `Import and transform content from: ${url}. ${additionalInstructions}`,
-          exportAs,
-          imageOptions: {
-            source: 'aiGenerated',
-            style: 'modern, professional'
-          },
-          cardOptions: {
-            dimensions: '16x9'
-          }
-        })
+        body: JSON.stringify(requestBody)
       });
 
       if (!gammaResponse.ok) {
@@ -215,23 +236,12 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // Get credit balance (useful for showing users remaining generations)
-    if (path === '/api/credits' && req.method === 'GET') {
-      // Note: Gamma doesn't have a direct credits endpoint
-      // You'd need to track this yourself or check via their dashboard
-      return res.status(200).json({
-        message: 'Check Gamma dashboard for credit balance',
-        estimatedCost: 40 // credits per generation
-      });
-    }
-
     return res.status(404).json({ error: 'Not found' });
 
   } catch (error) {
     console.error('API Error:', error);
     return res.status(500).json({ 
-      error: error.message || 'Internal server error',
-      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      error: error.message || 'Internal server error'
     });
   }
 };
