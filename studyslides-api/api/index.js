@@ -1,11 +1,11 @@
-// StudySlides Backend - Gamma API White Label Integration v3
-// With improved download URL detection and extended polling
+// StudySlides Backend - With Stripe Payments
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 module.exports = async function handler(req, res) {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
@@ -22,7 +22,8 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ 
         status: 'ok', 
         time: new Date().toISOString(),
-        gammaConfigured: !!GAMMA_API_KEY
+        gammaConfigured: !!GAMMA_API_KEY,
+        stripeConfigured: !!process.env.STRIPE_SECRET_KEY
       });
     }
 
@@ -42,6 +43,80 @@ module.exports = async function handler(req, res) {
       return res.status(200).json(data);
     }
 
+    // Create Stripe Checkout Session
+    if (path === '/api/create-checkout' && req.method === 'POST') {
+      const { numSlides, userEmail, prompt, theme, language, format } = req.body;
+      
+      if (!numSlides || numSlides < 1) {
+        return res.status(400).json({ error: 'Number of slides required' });
+      }
+
+      const pricePerSlide = 2000; // 20 NOK in øre
+      const totalAmount = numSlides * pricePerSlide;
+
+      const session = await stripe.checkout.sessions.create({
+        payment_method_types: ['card'],
+        line_items: [{
+          price_data: {
+            currency: 'nok',
+            product_data: {
+              name: `StudySlides - ${numSlides} Slide Presentation`,
+              description: `Generate a ${numSlides}-slide AI presentation`,
+            },
+            unit_amount: totalAmount,
+          },
+          quantity: 1,
+        }],
+        mode: 'payment',
+        success_url: `${req.headers.origin || 'https://studyslides.vercel.app'}?success=true&session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${req.headers.origin || 'https://studyslides.vercel.app'}?canceled=true`,
+        customer_email: userEmail || undefined,
+        metadata: {
+          numSlides: numSlides.toString(),
+          prompt: prompt ? prompt.substring(0, 500) : '',
+          theme: theme || '',
+          language: language || 'en',
+          format: format || 'presentation'
+        },
+      });
+
+      return res.status(200).json({ 
+        sessionId: session.id,
+        url: session.url 
+      });
+    }
+
+    // Verify payment and get session details
+    if (path === '/api/verify-payment' && req.method === 'GET') {
+      const sessionId = req.query.session_id;
+      
+      if (!sessionId) {
+        return res.status(400).json({ error: 'Session ID required' });
+      }
+
+      try {
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+        
+        if (session.payment_status === 'paid') {
+          return res.status(200).json({
+            paid: true,
+            numSlides: parseInt(session.metadata.numSlides),
+            prompt: session.metadata.prompt,
+            theme: session.metadata.theme,
+            language: session.metadata.language,
+            format: session.metadata.format,
+            customerEmail: session.customer_email,
+            amountPaid: session.amount_total,
+          });
+        } else {
+          return res.status(200).json({ paid: false });
+        }
+      } catch (e) {
+        console.error('Session retrieval error:', e);
+        return res.status(400).json({ error: 'Invalid session ID' });
+      }
+    }
+
     // Generate presentation (main endpoint)
     if (path === '/api/generate' && req.method === 'POST') {
       const { 
@@ -54,16 +129,30 @@ module.exports = async function handler(req, res) {
         exportAs = 'pptx',
         textOptions = {},
         imageOptions = {},
-        cardOptions = {}
+        cardOptions = {},
+        sessionId = null
       } = req.body;
 
       if (!inputText) {
         return res.status(400).json({ error: 'inputText is required' });
       }
 
+      // Verify payment if sessionId provided
+      if (sessionId) {
+        try {
+          const session = await stripe.checkout.sessions.retrieve(sessionId);
+          if (session.payment_status !== 'paid') {
+            return res.status(403).json({ error: 'Payment not completed' });
+          }
+          console.log('Payment verified for session:', sessionId);
+        } catch (e) {
+          console.error('Payment verification failed:', e);
+          return res.status(403).json({ error: 'Invalid payment session' });
+        }
+      }
+
       console.log('Generating presentation:', inputText.substring(0, 100));
 
-      // Build request body - IMPORTANT: exportAs must be exactly "pptx" as a string
       const requestBody = {
         inputText,
         textMode,
@@ -71,7 +160,7 @@ module.exports = async function handler(req, res) {
         numCards: Math.min(Math.max(numCards, 1), 60),
         cardSplit: 'auto',
         additionalInstructions,
-        exportAs: 'pptx', // Must be lowercase string
+        exportAs: 'pptx',
         textOptions: {
           amount: textOptions.amount || 'medium',
           tone: textOptions.tone || 'professional',
@@ -87,14 +176,12 @@ module.exports = async function handler(req, res) {
         }
       };
 
-      // Only add themeId if provided
       if (themeId && themeId.trim()) {
         requestBody.themeId = themeId;
       }
 
       console.log('Request body:', JSON.stringify(requestBody, null, 2));
 
-      // Call Gamma API
       const gammaResponse = await fetch(`${GAMMA_API_URL}/generations`, {
         method: 'POST',
         headers: {
@@ -128,7 +215,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // Check generation status - with improved download URL detection
+    // Check generation status
     if (path === '/api/status' && req.method === 'GET') {
       const generationId = req.query.id;
       
@@ -148,52 +235,42 @@ module.exports = async function handler(req, res) {
 
       const data = await response.json();
       
-      // Log the FULL response to see all available fields
       console.log('=== FULL GAMMA STATUS RESPONSE ===');
       console.log(JSON.stringify(data, null, 2));
       console.log('=== END RESPONSE ===');
       
-      // Extract gamma URL
       const gammaUrl = data.gammaUrl || data.url || data.gamma_url;
       
-      // Look for download URL in ALL possible locations
       let downloadUrl = null;
       
-      // Check direct fields
+      if (data.exportUrl) downloadUrl = data.exportUrl;
+      if (data.export_url) downloadUrl = data.export_url;
       if (data.downloadLink) downloadUrl = data.downloadLink;
       if (data.download_link) downloadUrl = data.download_link;
       if (data.pptxUrl) downloadUrl = data.pptxUrl;
       if (data.pptx_url) downloadUrl = data.pptx_url;
-      if (data.exportUrl) downloadUrl = data.exportUrl;
-      if (data.export_url) downloadUrl = data.export_url;
       
-      // Check nested exports object
       if (data.exports) {
         if (data.exports.pptx) downloadUrl = data.exports.pptx;
         if (data.exports.pptxUrl) downloadUrl = data.exports.pptxUrl;
         if (data.exports.downloadLink) downloadUrl = data.exports.downloadLink;
       }
       
-      // Check nested export object (singular)
       if (data.export) {
         if (data.export.pptx) downloadUrl = data.export.pptx;
         if (data.export.url) downloadUrl = data.export.url;
       }
       
-      // Check if there's a file or files field
       if (data.file) downloadUrl = data.file;
       if (data.fileUrl) downloadUrl = data.fileUrl;
       if (data.files && data.files.pptx) downloadUrl = data.files.pptx;
       
-      // Determine status
       let status = data.status;
       
-      // If completed but no download URL, keep as "waiting_for_export"
       if (data.status === 'completed' && !downloadUrl) {
         status = 'waiting_for_export';
       }
       
-      // Build response
       const result = {
         status: status,
         generationId: data.generationId,
@@ -201,7 +278,6 @@ module.exports = async function handler(req, res) {
         downloadUrl: downloadUrl,
         title: data.title,
         creditsUsed: data.credits?.deducted,
-        // Include all keys we found for debugging
         availableKeys: Object.keys(data)
       };
       
@@ -210,7 +286,7 @@ module.exports = async function handler(req, res) {
       return res.status(200).json(result);
     }
 
-    // Proxy download endpoint - downloads from Gamma and serves to user
+    // Proxy download endpoint
     if (path === '/api/download' && req.method === 'GET') {
       const { url } = req.query;
       
@@ -234,7 +310,6 @@ module.exports = async function handler(req, res) {
       const buffer = await response.arrayBuffer();
       const contentType = response.headers.get('content-type') || 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
       
-      // Extract filename from URL or use default
       let filename = 'presentation.pptx';
       try {
         const urlParts = url.split('/');
@@ -251,38 +326,6 @@ module.exports = async function handler(req, res) {
       res.setHeader('Content-Length', buffer.byteLength);
       
       return res.send(Buffer.from(buffer));
-    }
-
-    // Debug endpoint - make a fresh GET request to check for download URL
-    if (path === '/api/debug-status' && req.method === 'GET') {
-      const generationId = req.query.id;
-      
-      if (!generationId) {
-        return res.status(400).json({ error: 'Generation ID required' });
-      }
-
-      // Make multiple requests with delays to catch the download URL
-      const results = [];
-      
-      for (let i = 0; i < 3; i++) {
-        const response = await fetch(`${GAMMA_API_URL}/generations/${generationId}`, {
-          headers: { 'X-API-KEY': GAMMA_API_KEY }
-        });
-        
-        const data = await response.json();
-        results.push({
-          attempt: i + 1,
-          timestamp: new Date().toISOString(),
-          fullResponse: data
-        });
-        
-        // Wait 2 seconds between requests
-        if (i < 2) {
-          await new Promise(resolve => setTimeout(resolve, 2000));
-        }
-      }
-      
-      return res.status(200).json({ results });
     }
 
     return res.status(404).json({ error: 'Not found' });
